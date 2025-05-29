@@ -413,4 +413,83 @@ export function registerLocalRestApiTools(tools: ToolRegistry, server: Server) {
       };
     },
   );
+
+  // GET File Structure (Frontmatter + Headings) 
+  tools.register(
+    type({
+      name: '"get_file_structure"',
+      arguments: {
+        filename: "string",
+        "headingLevel?": "number",
+      },
+    }).describe(
+      "Get the frontmatter and headings of a specified level from a markdown file. If no heading level is specified, returns all headings.",
+    ),
+    async ({ arguments: args }) => {
+      // Get file content as JSON to access frontmatter and content separately
+      // Use a more flexible schema that allows any frontmatter types
+      const flexibleNoteSchema = type({
+        content: "string",
+        frontmatter: "Record<string, unknown>", // Allow any value types
+        path: "string",
+        stat: {
+          ctime: "number",
+          mtime: "number",
+          size: "number",
+        },
+        tags: "string[]",
+      });
+
+      const data = await makeRequest(
+        flexibleNoteSchema,
+        `/vault/${encodeURIComponent(args.filename)}`,
+        {
+          headers: { Accept: "application/vnd.olrapi.note+json" },
+        },
+      );
+
+      // Extract frontmatter (now supports any data types)
+      const frontmatter = data.frontmatter || {};
+      
+      // Parse headings from content
+      const content = data.content || "";
+      const lines = content.split('\n');
+      const headings: Array<{ level: number; text: string; line: number }> = [];
+      
+      lines.forEach((line: string, index: number) => {
+        const trimmedLine = line.trim();
+        if (trimmedLine.startsWith('#')) {
+          const match = trimmedLine.match(/^(#+)\s*(.*)$/);
+          if (match) {
+            const level = match[1].length;
+            const text = match[2].trim();
+            headings.push({
+              level,
+              text,
+              line: index + 1
+            });
+          }
+        }
+      });
+
+      // Filter headings by level if specified
+      const filteredHeadings = args.headingLevel 
+        ? headings.filter(heading => heading.level === args.headingLevel)
+        : headings;
+
+      // Prepare response
+      const result = {
+        filename: args.filename,
+        frontmatter,
+        headings: filteredHeadings,
+        totalHeadings: headings.length,
+        filteredCount: filteredHeadings.length,
+        ...(args.headingLevel && { requestedLevel: args.headingLevel })
+      };
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
 }

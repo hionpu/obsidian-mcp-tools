@@ -3,6 +3,20 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { type } from "arktype";
 import { LocalRestAPI } from "shared";
 
+// Flexible note schema that handles any frontmatter data types
+// This is an alternative to LocalRestAPI.ApiNoteJson which restricts frontmatter to strings only
+const FlexibleNoteSchema = type({
+  content: "string",
+  frontmatter: "Record<string, unknown>", // Allow any value types (arrays, booleans, null, etc.)
+  path: "string",
+  stat: {
+    ctime: "number",
+    mtime: "number",
+    size: "number",
+  },
+  tags: "string[]",
+});
+
 export function registerLocalRestApiTools(tools: ToolRegistry, server: Server) {
   // GET Status
   tools.register(
@@ -35,8 +49,9 @@ export function registerLocalRestApiTools(tools: ToolRegistry, server: Server) {
         args?.format === "json"
           ? "application/vnd.olrapi.note+json"
           : "text/markdown";
+          
       const data = await makeRequest(
-        LocalRestAPI.ApiNoteJson.or("string"),
+        args?.format === "json" ? FlexibleNoteSchema : type("string"),
         "/active/",
         {
           headers: { Accept: format },
@@ -278,8 +293,9 @@ export function registerLocalRestApiTools(tools: ToolRegistry, server: Server) {
       const format = isJson
         ? "application/vnd.olrapi.note+json"
         : "text/markdown";
+      
       const data = await makeRequest(
-        isJson ? LocalRestAPI.ApiNoteJson : LocalRestAPI.ApiContentResponse,
+        isJson ? FlexibleNoteSchema : LocalRestAPI.ApiContentResponse,
         `/vault/${encodeURIComponent(args.filename)}`,
         {
           headers: { Accept: format },
@@ -427,21 +443,8 @@ export function registerLocalRestApiTools(tools: ToolRegistry, server: Server) {
     ),
     async ({ arguments: args }) => {
       // Get file content as JSON to access frontmatter and content separately
-      // Use a more flexible schema that allows any frontmatter types
-      const flexibleNoteSchema = type({
-        content: "string",
-        frontmatter: "Record<string, unknown>", // Allow any value types
-        path: "string",
-        stat: {
-          ctime: "number",
-          mtime: "number",
-          size: "number",
-        },
-        tags: "string[]",
-      });
-
       const data = await makeRequest(
-        flexibleNoteSchema,
+        FlexibleNoteSchema,
         `/vault/${encodeURIComponent(args.filename)}`,
         {
           headers: { Accept: "application/vnd.olrapi.note+json" },

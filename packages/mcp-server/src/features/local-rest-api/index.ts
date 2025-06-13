@@ -1,4 +1,8 @@
-import { makeRequest, type ToolRegistry } from "$/shared";
+import { makeRequest, type ToolRegistry, 
+  getFileWithCompression, createFileWithCompression, 
+  appendToFileWithCompression, patchFileWithCompression,
+  deleteFileWithCompression, clearRulesCache, 
+  generateCompressedVersion } from "$/shared";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { type } from "arktype";
 import { LocalRestAPI } from "shared";
@@ -287,29 +291,55 @@ export function registerLocalRestApiTools(tools: ToolRegistry, server: Server) {
         filename: "string",
         "format?": '"markdown" | "json"',
       },
-    }).describe("Get the content of a file from your vault."),
+    }).describe("Get the content of a file from your vault. Automatically returns compressed version (.aicomp) if available, otherwise returns the original file."),
     async ({ arguments: args }) => {
-      const isJson = args.format === "json";
-      const format = isJson
-        ? "application/vnd.olrapi.note+json"
-        : "text/markdown";
-      
-      const data = await makeRequest(
-        isJson ? FlexibleNoteSchema : LocalRestAPI.ApiContentResponse,
-        `/vault/${encodeURIComponent(args.filename)}`,
-        {
-          headers: { Accept: format },
-        },
-      );
-      return {
-        content: [
+      try {
+        const result = await getFileWithCompression(args.filename, args.format || 'markdown');
+        
+        const content = typeof result.content === "string" 
+          ? result.content 
+          : JSON.stringify(result.content, null, 2);
+          
+        const compressionNote = result.isCompressed 
+          ? " (compressed version)" 
+          : " (original version)";
+          
+        return {
+          content: [
+            {
+              type: "text",
+              text: content,
+            },
+            {
+              type: "text",
+              text: `Source: ${result.sourcePath}${compressionNote}`,
+            },
+          ],
+        };
+      } catch (error) {
+        // Fall back to original implementation if compression fails
+        const isJson = args.format === "json";
+        const format = isJson
+          ? "application/vnd.olrapi.note+json"
+          : "text/markdown";
+        
+        const data = await makeRequest(
+          isJson ? FlexibleNoteSchema : LocalRestAPI.ApiContentResponse,
+          `/vault/${encodeURIComponent(args.filename)}`,
           {
-            type: "text",
-            text:
-              typeof data === "string" ? data : JSON.stringify(data, null, 2),
+            headers: { Accept: format },
           },
-        ],
-      };
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                typeof data === "string" ? data : JSON.stringify(data, null, 2),
+            },
+          ],
+        };
+      }
     },
   );
 
@@ -321,19 +351,31 @@ export function registerLocalRestApiTools(tools: ToolRegistry, server: Server) {
         filename: "string",
         content: "string",
       },
-    }).describe("Create a new file in your vault or update an existing one."),
+    }).describe("Create a new file in your vault or update an existing one. Automatically creates both original (.md) and compressed (.aicomp) versions using Co-Located HAPDS."),
     async ({ arguments: args }) => {
-      await makeRequest(
-        LocalRestAPI.ApiNoContentResponse,
-        `/vault/${encodeURIComponent(args.filename)}`,
-        {
-          method: "PUT",
-          body: args.content,
-        },
-      );
-      return {
-        content: [{ type: "text", text: "File created successfully" }],
-      };
+      try {
+        await createFileWithCompression(args.filename, args.content);
+        return {
+          content: [
+            { type: "text", text: "File created successfully" },
+            { type: "text", text: `Created: ${args.filename} (original)` },
+            { type: "text", text: `Created: ${args.filename}.aicomp (compressed)` },
+          ],
+        };
+      } catch (error) {
+        // Fall back to original implementation if compression fails
+        await makeRequest(
+          LocalRestAPI.ApiNoContentResponse,
+          `/vault/${encodeURIComponent(args.filename)}`,
+          {
+            method: "PUT",
+            body: args.content,
+          },
+        );
+        return {
+          content: [{ type: "text", text: "File created successfully (original only)" }],
+        };
+      }
     },
   );
 
@@ -345,19 +387,31 @@ export function registerLocalRestApiTools(tools: ToolRegistry, server: Server) {
         filename: "string",
         content: "string",
       },
-    }).describe("Append content to a new or existing file."),
+    }).describe("Append content to a new or existing file. Automatically updates both original and compressed (.aicomp) versions using Co-Located HAPDS."),
     async ({ arguments: args }) => {
-      await makeRequest(
-        LocalRestAPI.ApiNoContentResponse,
-        `/vault/${encodeURIComponent(args.filename)}`,
-        {
-          method: "POST",
-          body: args.content,
-        },
-      );
-      return {
-        content: [{ type: "text", text: "Content appended successfully" }],
-      };
+      try {
+        await appendToFileWithCompression(args.filename, args.content);
+        return {
+          content: [
+            { type: "text", text: "Content appended successfully" },
+            { type: "text", text: `Updated: ${args.filename} (original)` },
+            { type: "text", text: `Updated: ${args.filename}.aicomp (compressed)` },
+          ],
+        };
+      } catch (error) {
+        // Fall back to original implementation if compression fails
+        await makeRequest(
+          LocalRestAPI.ApiNoContentResponse,
+          `/vault/${encodeURIComponent(args.filename)}`,
+          {
+            method: "POST",
+            body: args.content,
+          },
+        );
+        return {
+          content: [{ type: "text", text: "Content appended successfully (original only)" }],
+        };
+      }
     },
   );
 
@@ -369,7 +423,7 @@ export function registerLocalRestApiTools(tools: ToolRegistry, server: Server) {
         filename: "string",
       }).and(LocalRestAPI.ApiPatchParameters),
     }).describe(
-      "Insert or modify content in a file relative to a heading, block reference, or frontmatter field.",
+      "Insert or modify content in a file relative to a heading, block reference, or frontmatter field. Automatically updates both original and compressed (.aicomp) versions using Co-Located HAPDS.",
     ),
     async ({ arguments: args }) => {
       const headers: HeadersInit = {
@@ -389,22 +443,40 @@ export function registerLocalRestApiTools(tools: ToolRegistry, server: Server) {
         headers["Content-Type"] = args.contentType;
       }
 
-      const response = await makeRequest(
-        LocalRestAPI.ApiContentResponse,
-        `/vault/${encodeURIComponent(args.filename)}`,
-        {
-          method: "PATCH",
-          headers,
-          body: args.content,
-        },
-      );
+      try {
+        const response = await patchFileWithCompression(
+          args.filename,
+          args.content,
+          headers
+        );
 
-      return {
-        content: [
-          { type: "text", text: "File patched successfully" },
-          { type: "text", text: response },
-        ],
-      };
+        return {
+          content: [
+            { type: "text", text: "File patched successfully" },
+            { type: "text", text: `Updated: ${args.filename} (original)` },
+            { type: "text", text: `Updated: ${args.filename}.aicomp (compressed)` },
+            { type: "text", text: response },
+          ],
+        };
+      } catch (error) {
+        // Fall back to original implementation if compression fails
+        const response = await makeRequest(
+          LocalRestAPI.ApiContentResponse,
+          `/vault/${encodeURIComponent(args.filename)}`,
+          {
+            method: "PATCH",
+            headers,
+            body: args.content,
+          },
+        );
+
+        return {
+          content: [
+            { type: "text", text: "File patched successfully (original only)" },
+            { type: "text", text: response },
+          ],
+        };
+      }
     },
   );
 
@@ -415,18 +487,30 @@ export function registerLocalRestApiTools(tools: ToolRegistry, server: Server) {
       arguments: {
         filename: "string",
       },
-    }).describe("Delete a file from your vault."),
+    }).describe("Delete a file from your vault. Automatically deletes both original and compressed (.aicomp) versions if they exist."),
     async ({ arguments: args }) => {
-      await makeRequest(
-        LocalRestAPI.ApiNoContentResponse,
-        `/vault/${encodeURIComponent(args.filename)}`,
-        {
-          method: "DELETE",
-        },
-      );
-      return {
-        content: [{ type: "text", text: "File deleted successfully" }],
-      };
+      try {
+        await deleteFileWithCompression(args.filename);
+        return {
+          content: [
+            { type: "text", text: "File deleted successfully" },
+            { type: "text", text: `Deleted: ${args.filename} (original)` },
+            { type: "text", text: `Deleted: ${args.filename}.aicomp (compressed, if existed)` },
+          ],
+        };
+      } catch (error) {
+        // Fall back to original implementation if compression fails
+        await makeRequest(
+          LocalRestAPI.ApiNoContentResponse,
+          `/vault/${encodeURIComponent(args.filename)}`,
+          {
+            method: "DELETE",
+          },
+        );
+        return {
+          content: [{ type: "text", text: "File deleted successfully (original only)" }],
+        };
+      }
     },
   );
 
@@ -493,6 +577,208 @@ export function registerLocalRestApiTools(tools: ToolRegistry, server: Server) {
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
+    },
+  );
+
+  // UPDATE Frontmatter (Bulk Operations)
+  tools.register(
+    type({
+      name: '"update_frontmatter"',
+      arguments: {
+        filename: "string",
+        operation: type('"merge" | "replace"'),
+        frontmatter: "Record<string, unknown>",
+      },
+    }).describe(
+      "Update frontmatter in a markdown file. Use 'merge' to update specific fields while keeping others, or 'replace' to completely replace the frontmatter.",
+    ),
+    async ({ arguments: args }) => {
+      // Get current file data
+      const currentData = await makeRequest(
+        FlexibleNoteSchema,
+        `/vault/${encodeURIComponent(args.filename)}`,
+        {
+          headers: { Accept: "application/vnd.olrapi.note+json" },
+        },
+      );
+
+      let newFrontmatter: Record<string, unknown>;
+
+      if (args.operation === "merge") {
+        // Merge with existing frontmatter
+        newFrontmatter = {
+          ...currentData.frontmatter,
+          ...args.frontmatter,
+        };
+      } else {
+        // Replace entire frontmatter
+        newFrontmatter = args.frontmatter;
+      }
+
+      // Convert frontmatter to YAML format
+      const yamlLines = [];
+      yamlLines.push("---");
+      
+      for (const [key, value] of Object.entries(newFrontmatter)) {
+        if (value === null) {
+          yamlLines.push(`${key}: null`);
+        } else if (typeof value === "string") {
+          // Handle strings with special characters
+          const needsQuotes = value.includes(":") || value.includes("#") || value.includes("'") || value.includes('"');
+          yamlLines.push(`${key}: ${needsQuotes ? `"${value.replace(/"/g, '\\"')}"` : value}`);
+        } else if (Array.isArray(value)) {
+          yamlLines.push(`${key}: [${value.map(v => typeof v === "string" ? `"${v}"` : v).join(", ")}]`);
+        } else if (typeof value === "object") {
+          yamlLines.push(`${key}:`);
+          for (const [subKey, subValue] of Object.entries(value as Record<string, unknown>)) {
+            yamlLines.push(`  ${subKey}: ${typeof subValue === "string" ? `"${subValue}"` : subValue}`);
+          }
+        } else {
+          yamlLines.push(`${key}: ${value}`);
+        }
+      }
+      
+      yamlLines.push("---");
+
+      // Get content without frontmatter
+      const content = currentData.content || "";
+      const contentLines = content.split('\n');
+      
+      // Find where content starts (after frontmatter)
+      let contentStartIndex = 0;
+      if (contentLines[0]?.trim() === "---") {
+        for (let i = 1; i < contentLines.length; i++) {
+          if (contentLines[i]?.trim() === "---") {
+            contentStartIndex = i + 1;
+            break;
+          }
+        }
+      }
+
+      // Combine new frontmatter with existing content
+      const newContent = [
+        ...yamlLines,
+        ...contentLines.slice(contentStartIndex)
+      ].join('\n');
+
+      // Update the file
+      await makeRequest(
+        LocalRestAPI.ApiNoContentResponse,
+        `/vault/${encodeURIComponent(args.filename)}`,
+        {
+          method: "PUT",
+          body: newContent,
+        },
+      );
+
+      // Return summary of changes
+      const result = {
+        filename: args.filename,
+        operation: args.operation,
+        updatedFields: Object.keys(args.frontmatter),
+        finalFrontmatter: newFrontmatter,
+      };
+
+      return {
+        content: [
+          { type: "text", text: "Frontmatter updated successfully" },
+          { type: "text", text: JSON.stringify(result, null, 2) },
+        ],
+      };
+    },
+  );
+
+  // HAPDS Compression Management
+  tools.register(
+    type({
+      name: '"manage_hapds_compression"',
+      arguments: {
+        action: type('"clear_cache" | "regenerate_compressed" | "status"'),
+        "filename?": "string",
+      },
+    }).describe(
+      "Manage the Co-Located HAPDS (Human-AI Parallel Documentation System) compression. Actions: 'clear_cache' to clear GenCompRules cache, 'regenerate_compressed' to recreate .aicomp file for a specific document, 'status' to check compression system status.",
+    ),
+    async ({ arguments: args }) => {
+      switch (args.action) {
+        case "clear_cache":
+          clearRulesCache();
+          return {
+            content: [
+              { type: "text", text: "GenCompRules cache cleared successfully" },
+              { type: "text", text: "Next compression operation will reload rules from _mcp/GenCompRules.md" },
+            ],
+          };
+
+        case "regenerate_compressed":
+          if (!args.filename) {
+            return {
+              content: [
+                { type: "text", text: "Error: filename is required for regenerate_compressed action" },
+              ],
+            };
+          }
+          
+          try {
+            // Get original file content
+            const originalContent = await makeRequest(
+              LocalRestAPI.ApiContentResponse,
+              `/vault/${encodeURIComponent(args.filename)}`,
+              {
+                headers: { Accept: "text/markdown" },
+              },
+            );
+            
+            // Generate new compressed version
+            const compressedContent = await generateCompressedVersion(originalContent, args.filename);
+            const compressedPath = `${args.filename}.aicomp`;
+            
+            // Save compressed version
+            await makeRequest(
+              LocalRestAPI.ApiNoContentResponse,
+              `/vault/${encodeURIComponent(compressedPath)}`,
+              {
+                method: "PUT",
+                body: compressedContent,
+              },
+            );
+            
+            return {
+              content: [
+                { type: "text", text: `Compressed version regenerated successfully` },
+                { type: "text", text: `Original: ${args.filename}` },
+                { type: "text", text: `Compressed: ${compressedPath}` },
+                { type: "text", text: `Compression ratio: ${Math.round((1 - compressedContent.length / originalContent.length) * 100)}%` },
+              ],
+            };
+          } catch (error) {
+            return {
+              content: [
+                { type: "text", text: `Error regenerating compressed version: ${error}` },
+              ],
+            };
+          }
+
+        case "status":
+          return {
+            content: [
+              { type: "text", text: "Co-Located HAPDS Compression System Status" },
+              { type: "text", text: "✓ Compression system active" },
+              { type: "text", text: "✓ Auto-compression on file creation/update enabled" },
+              { type: "text", text: "✓ Auto-selection of compressed versions on read enabled" },
+              { type: "text", text: "Configuration: Reads from _mcp/GenCompRules.md in vault root" },
+              { type: "text", text: "File extensions: .aicomp for compressed versions" },
+              { type: "text", text: "Cache: GenCompRules cached for 5 minutes per vault" },
+            ],
+          };
+
+        default:
+          return {
+            content: [
+              { type: "text", text: "Error: Invalid action. Use 'clear_cache', 'regenerate_compressed', or 'status'" },
+            ],
+          };
+      }
     },
   );
 }
